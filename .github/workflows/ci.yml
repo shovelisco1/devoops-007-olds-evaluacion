@@ -1,0 +1,62 @@
+name: CI-CD Microservicio Node.js
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    name: Pruebas, seguridad y despliegue simulado
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v7
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Instalar dependencias de forma reproducible
+        run: npm ci
+
+      - name: Ejecutar pruebas automatizadas
+        run: npm test
+
+      - name: Revisar vulnerabilidades con npm audit
+        run: npm audit --audit-level=high
+
+      - name: Analizar dependencias con Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: npx --yes snyk@latest test --severity-threshold=high
+
+      - name: Construir imagen Docker
+        run: docker build --pull --tag microservicio-evaluacion:local .
+
+      - name: Desplegar con Docker Compose
+        run: docker compose up -d --no-build
+
+      - name: Verificar que el servicio desplegado responde
+        run: |
+          for intento in $(seq 1 15); do
+            if curl --fail --silent http://127.0.0.1:3000/api/health; then
+              echo
+              echo "Healthcheck HTTP correcto."
+              exit 0
+            fi
+            echo "Esperando a que el microservicio esté listo ($intento/15)..."
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+
+      - name: Detener el despliegue de prueba
+        if: always()
+        run: docker compose down --remove-orphans || true
