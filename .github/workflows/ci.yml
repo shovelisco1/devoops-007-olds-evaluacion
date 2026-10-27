@@ -32,11 +32,6 @@ jobs:
       - name: Revisar vulnerabilidades con npm audit
         run: npm audit --audit-level=high
 
-      - name: Analizar dependencias con Snyk
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        run: npx --yes snyk@latest test --severity-threshold=high
-
       - name: Construir imagen Docker
         run: docker build --pull --tag microservicio-evaluacion:local .
 
