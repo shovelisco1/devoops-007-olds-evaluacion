@@ -8,3 +8,6 @@ README.md
 .env.*
 *.log
 npm-debug.log*
+monitoring
+k8s
+scripts

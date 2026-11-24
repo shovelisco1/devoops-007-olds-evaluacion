@@ -1,0 +1,155 @@
+name: Deploy microservicio en AWS EKS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Build, publicar en ECR y desplegar en EKS
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v7
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar pruebas con cobertura
+        run: npm run test:ci
+
+      - name: Auditar dependencias y configuración
+        run: |
+          npm audit --audit-level=high
+          npm run audit
+
+      - name: Validar variables de despliegue
+        env:
+          CHECK_AWS_REGION: ${{ vars.AWS_REGION }}
+          CHECK_EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+          CHECK_ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          if [[ -z "$CHECK_AWS_REGION" || -z "$CHECK_EKS_CLUSTER_NAME" || -z "$CHECK_ECR_REPOSITORY" ]]; then
+            echo "Configura AWS_REGION, EKS_CLUSTER_NAME y ECR_REPOSITORY en Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+
+      - name: Configurar credenciales AWS mediante OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Iniciar sesión en Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Preparar herramientas Kubernetes
+        uses: azure/setup-kubectl@v4
+
+      - name: Preparar Helm
+        uses: azure/setup-helm@v4
+
+      - name: Construir y publicar la imagen en ECR
+        id: image
+        shell: bash
+        run: |
+          if [[ -z "$AWS_REGION" || -z "$EKS_CLUSTER_NAME" || -z "$ECR_REPOSITORY" ]]; then
+            echo "Configura las variables AWS_REGION, EKS_CLUSTER_NAME y ECR_REPOSITORY en GitHub."
+            exit 1
+          fi
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null
+          fi
+
+          docker build --pull --tag "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Conectar con el clúster EKS
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Instalar o actualizar Prometheus y Grafana
+        env:
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          if [[ -z "$GRAFANA_ADMIN_PASSWORD" ]]; then
+            echo "Configura el secreto GRAFANA_ADMIN_PASSWORD en GitHub."
+            exit 1
+          fi
+
+          kubectl apply -f k8s/namespace.yaml
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --create-namespace \
+            --values k8s/monitoring-values.yaml \
+            --set grafana.adminPassword="$GRAFANA_ADMIN_PASSWORD" \
+            --wait \
+            --timeout 10m
+
+      - name: Preparar Pushgateway, ServiceMonitor y dashboard
+        run: |
+          kubectl apply -f k8s/pushgateway.yaml
+          kubectl apply -f k8s/servicemonitor.yaml
+          kubectl -n monitoring create configmap microservicio-dashboard \
+            --from-file=microservicio.json=monitoring/grafana/dashboards/microservicio.json \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n monitoring label configmap microservicio-dashboard grafana_dashboard=1 --overwrite
+
+      - name: Desplegar aplicación en Kubernetes
+        id: rollout
+        shell: bash
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
+        run: |
+          START_MS=$(date +%s%3N)
+          sed "s|IMAGE_URI_PLACEHOLDER|${IMAGE_URI}|g" k8s/app.yaml | kubectl apply -f -
+          kubectl rollout status deployment/microservicio -n microservicio --timeout=180s
+          END_MS=$(date +%s%3N)
+          DURATION=$(awk "BEGIN { printf \"%.3f\", ($END_MS - $START_MS) / 1000 }")
+          echo "deployment_duration=$DURATION" >> "$GITHUB_OUTPUT"
+          echo "Despliegue EKS completado en ${DURATION}s"
+
+      - name: Publicar métricas CI/CD en Prometheus del clúster
+        env:
+          CI_DEPLOYMENT_DURATION_SECONDS: ${{ steps.rollout.outputs.deployment_duration }}
+        run: |
+          kubectl -n monitoring port-forward svc/prometheus-pushgateway 9091:9091 >/tmp/pushgateway-port-forward.log 2>&1 &
+          PORT_FORWARD_PID=$!
+          trap 'kill "$PORT_FORWARD_PID" 2>/dev/null || true' EXIT
+
+          for intento in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:9091/metrics >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          node scripts/push-ci-metrics.js
+
+      - name: Verificar despliegue
+        if: always()
+        run: |
+          kubectl get deployments,services,pods -n microservicio || true
+          kubectl get pods -n monitoring || true

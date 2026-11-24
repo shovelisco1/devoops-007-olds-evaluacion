@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "test:ci": "jest --runInBand --coverage --coverageReporters=json-summary",
+    "audit": "node scripts/audit-project.js",
+    "monitoring:up": "bash scripts/monitoring-up.sh"
   },
   "dependencies": {
     "express": "^4.21.2"
@@ -16,5 +19,21 @@
   },
   "engines": {
     "node": ">=22 <25"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "app.js",
+      "metrics.js",
+      "logger.js"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 50,
+        "functions": 70,
+        "lines": 75,
+        "statements": 75
+      }
+    }
   }
 }

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   pipeline:
-    name: Pruebas, seguridad y despliegue simulado
+    name: Pruebas, auditoría y despliegue simulado
     runs-on: ubuntu-latest
     steps:
       - name: Obtener el código
@@ -26,32 +26,60 @@ jobs:
       - name: Instalar dependencias de forma reproducible
         run: npm ci
 
-      - name: Ejecutar pruebas automatizadas
-        run: npm test
+      - name: Ejecutar pruebas y medir cobertura
+        run: npm run test:ci
 
-      - name: Revisar vulnerabilidades con npm audit
+      - name: Auditoría de cumplimiento del proyecto
+        run: npm run audit
+
+      - name: Revisar vulnerabilidades de dependencias
         run: npm audit --audit-level=high
 
-      - name: Construir imagen Docker
-        run: docker build --pull --tag microservicio-evaluacion:local .
-
-      - name: Desplegar con Docker Compose
-        run: docker compose up -d --no-build
-
-      - name: Verificar que el servicio desplegado responde
+      - name: Desplegar microservicio y monitoreo con Docker Compose
+        id: deploy
         run: |
-          for intento in $(seq 1 15); do
+          START_MS=$(date +%s%3N)
+          docker compose --profile monitoring up --build -d
+
+          for intento in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3000/api/health; then
               echo
               echo "Healthcheck HTTP correcto."
-              exit 0
+              break
             fi
-            echo "Esperando a que el microservicio esté listo ($intento/15)..."
+            if [ "$intento" -eq 30 ]; then
+              docker compose --profile monitoring logs
+              exit 1
+            fi
+            echo "Esperando al microservicio ($intento/30)..."
             sleep 2
           done
-          docker compose logs
-          exit 1
 
-      - name: Detener el despliegue de prueba
+          for intento in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:9091/-/ready >/dev/null; then
+              break
+            fi
+            if [ "$intento" -eq 20 ]; then
+              docker compose --profile monitoring logs pushgateway
+              exit 1
+            fi
+            sleep 1
+          done
+
+          END_MS=$(date +%s%3N)
+          DURATION=$(awk "BEGIN { printf \"%.3f\", ($END_MS - $START_MS) / 1000 }")
+          echo "deployment_duration=$DURATION" >> "$GITHUB_OUTPUT"
+          echo "Duración del despliegue de prueba: ${DURATION}s"
+
+      - name: Enviar métricas de cobertura y despliegue a Prometheus
+        env:
+          CI_DEPLOYMENT_DURATION_SECONDS: ${{ steps.deploy.outputs.deployment_duration }}
+        run: node scripts/push-ci-metrics.js
+
+      - name: Mostrar estado final de los contenedores
         if: always()
-        run: docker compose down --remove-orphans || true
+        run: docker compose --profile monitoring ps || true
+
+      - name: Detener el entorno de prueba
+        if: always()
+        run: docker compose --profile monitoring down --remove-orphans || true

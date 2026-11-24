@@ -1,93 +1,125 @@
-# Microservicio de evaluación DevOps
+# Microservicio de evaluación DevOps — EP3
 
-Microservicio Node.js y Express con un endpoint de salud, pruebas automatizadas, análisis de dependencias y despliegue simulado usando Docker Compose.
+Microservicio Node.js + Express con CI/CD, pruebas automatizadas, auditoría de configuración, métricas Prometheus, dashboard Grafana y manifiestos para Kubernetes en Amazon EKS.
 
-## Requisitos
+## 1. Arquitectura
 
-- Node.js 24 LTS y npm.
-- La imagen Docker usa `node:24-bookworm-slim` y ejecuta Node directamente como usuario sin privilegios.
-- Docker Desktop con Docker Compose.
-- Repositorio en GitHub para ejecutar GitHub Actions.
-- Un token de Snyk guardado en el repositorio como secreto `SNYK_TOKEN`.
+- **Aplicación:** Node.js 24 y Express 4. Expone `/api/health`, `/api/live`, `/api/ready` y `/metrics`.
+- **Logging:** eventos JSON por salida estándar. Docker muestra los logs con Compose y Amazon CloudWatch los puede centralizar mediante el complemento de observabilidad de EKS.
+- **Métricas:** contadores de solicitudes y errores HTTP, latencia, memoria RSS, heap, CPU y uptime del proceso Node.js.
+- **Monitoreo local:** Prometheus recopila las métricas; Pushgateway recibe cobertura y duración del despliegue de CI; Grafana presenta el dashboard.
+- **Kubernetes:** manifiestos de Deployment, Service, ConfigMap, sondas de salud y límites de recursos para Amazon EKS.
+- **Calidad y cumplimiento:** Jest con umbral de cobertura, `npm audit`, auditoría personalizada del Dockerfile/Compose y protección de ramas en GitHub.
 
-## Puerto y endpoint
+## 2. Ejecutar pruebas
 
-- Puerto dentro del contenedor: `3000`.
-- Puerto predeterminado del equipo: `3000`.
-- Endpoint de salud: `GET http://localhost:3000/api/health`.
-
-Respuesta esperada:
-
-```json
-{
-  "status": "success",
-  "message": "El microservicio está funcionando correctamente",
-  "version": "1.0.0"
-}
-```
-
-Si el puerto 3000 está ocupado, se puede usar otro puerto del equipo:
-
-```powershell
-$env:HOST_PORT="3001"
-docker compose up --build -d
-```
-
-En ese caso, el endpoint estará disponible en `http://localhost:3001/api/health`.
-
-## Ejecutar localmente sin Docker
-
-En la carpeta raíz del proyecto, ejecutar:
+Requisitos: Node.js 24 y npm.
 
 ```bash
-npm install
+npm ci
 npm test
-npm start
+npm run test:ci
+npm run audit
 ```
 
-Luego abrir `http://localhost:3000/api/health`. El comando `npm install` crea `package-lock.json` si todavía no existe. Ese archivo debe subirse a Git para que `npm ci` pueda instalar las mismas versiones en CI y Docker.
+`npm run test:ci` genera `coverage/coverage-summary.json` y detiene la ejecución si no se cumplen los umbrales definidos en `package.json`.
 
-## Si Docker informa `exec format error` al iniciar el contenedor
+## 3. Ejecutar microservicio y observabilidad en local
 
-El Dockerfile usa una imagen base Debian slim y define `ENTRYPOINT ["node"]` para no depender del script `docker-entrypoint.sh` de la imagen base. Si el mismo error ocurre al ejecutar una imagen oficial de Node independientemente de este proyecto, el origen está en la instalación/arquitectura de Docker Desktop o WSL, y no en `app.js`; el código de la aplicación no puede reparar ese problema del motor.
+Requisitos: Docker Desktop y Docker Compose.
 
-## Ejecutar con Docker Compose
+1. Instala las dependencias y genera la cobertura que el dashboard mostrará:
 
 ```bash
-docker compose up --build -d
-docker compose ps
-docker compose logs -f microservicio
-docker compose down
+npm ci
+npm run test:ci
 ```
 
-Compose publica el puerto 3000 y aplica límites de CPU/memoria, usuario no root, sistema de archivos de solo lectura, eliminación de capacidades y restricción de privilegios.
+2. Opcionalmente, crea un archivo `.env` desde `.env.example` y cambia `GRAFANA_ADMIN_PASSWORD`.
+3. Inicia la aplicación, Prometheus, Pushgateway y Grafana. El script espera los healthchecks y publica cobertura/duración al Pushgateway:
 
-## Pipeline CI/CD
+```bash
+npm run monitoring:up
+```
 
-El workflow `.github/workflows/ci.yml` se ejecuta al hacer `push` o abrir un `pull request` hacia `main` o `develop`. En orden:
+4. Comprueba los servicios:
 
-1. Descarga el repositorio y configura Node.js.
-2. Instala dependencias mediante `npm ci`.
-3. Ejecuta las pruebas Jest/Supertest.
-4. Bloquea el pipeline si `npm audit` informa vulnerabilidades altas o críticas.
-5. Ejecuta Snyk y bloquea el pipeline ante vulnerabilidades altas o críticas.
-6. Construye la imagen Docker.
-7. Despliega temporalmente la aplicación mediante Docker Compose y comprueba `/api/health`.
-8. Detiene los contenedores de prueba al terminar.
+```bash
+docker compose --profile monitoring ps
+curl http://localhost:3000/api/health
+curl http://localhost:3000/api/ready
+curl http://localhost:3000/metrics
+```
 
-## Configurar Snyk en GitHub
+4. Abre las interfaces:
 
-1. Crear una cuenta en Snyk y obtener un token de API.
-2. En GitHub, abrir el repositorio y entrar a **Settings → Secrets and variables → Actions**.
-3. Crear un repositorio secret llamado `SNYK_TOKEN` y pegar el token como valor.
-4. Volver a ejecutar el workflow desde **Actions**.
+| Herramienta | Dirección | Uso |
+|---|---|---|
+| Microservicio | http://localhost:3000/api/health | Disponibilidad |
+| Métricas | http://localhost:3000/metrics | Formato Prometheus |
+| Prometheus | http://localhost:9090 | Consultas y targets |
+| Grafana | http://localhost:3001 | Dashboard EP3 |
+| Pushgateway | http://localhost:9091 | Métricas CI/CD recibidas |
 
-No guardar tokens, contraseñas ni archivos `.env` en el repositorio. El workflow requiere `SNYK_TOKEN`: si no está configurado o el análisis falla, el pipeline no continuará al despliegue.
+Grafana utiliza el usuario `admin`. La contraseña local predeterminada del Compose es `cambiar-esta-clave`; cámbiala en `.env` antes de compartir o publicar el entorno.
 
-## Dependabot y actualizaciones
+El dashboard se provisiona automáticamente en Grafana bajo la carpeta **DevOps EP3**. Contiene disponibilidad, solicitudes por segundo, porcentaje de respuestas 4xx/5xx, latencia p95, CPU, memoria RSS, cobertura de pruebas y duración del despliegue.
 
-El archivo `.github/dependabot.yml` revisa semanalmente las dependencias npm y las acciones utilizadas en GitHub Actions. Dependabot propone actualizaciones mediante pull requests; estas deben pasar el pipeline antes de integrarse.
+Para revisar logs estructurados:
 
-## Trazabilidad y calidad
+```bash
+docker compose logs -f microservicio
+```
 
-Cada ejecución de GitHub Actions queda asociada al commit o pull request que la inició. Los logs muestran las pruebas, análisis de seguridad, construcción de imagen y verificación del servicio. Las etapas posteriores no se ejecutan si falla una prueba o una revisión de seguridad.
+Los logs contienen timestamp, nivel, nombre del servicio, ruta, método, código HTTP y duración. No se escriben archivos de log dentro del contenedor.
+
+Para detener el entorno:
+
+```bash
+docker compose --profile monitoring down
+```
+
+Los volúmenes de Prometheus y Grafana se conservan. Para borrar también los datos locales guardados:
+
+```bash
+docker compose --profile monitoring down -v
+```
+
+## 4. Pipeline CI/CD
+
+El workflow `.github/workflows/ci.yml` ejecuta en `push` y `pull_request` hacia `main` y `develop`:
+
+1. Instala las dependencias reproduciblemente con `npm ci`.
+2. Ejecuta Jest y calcula cobertura de líneas.
+3. Comprueba las reglas de configuración segura mediante `npm run audit`.
+4. Ejecuta `npm audit --audit-level=high` y falla con vulnerabilidades altas o críticas.
+5. Construye e inicia la aplicación y el stack de monitoreo con Docker Compose.
+6. Comprueba `/api/health`.
+7. Mide la duración del despliegue y envía cobertura y duración a Pushgateway para que Prometheus las recoja.
+8. Detiene el entorno de prueba aunque una etapa falle.
+
+El archivo `.github/workflows/deploy-eks.yml` permite lanzar manualmente el despliegue automatizado en AWS EKS. Requiere configurar las variables y secretos descritos en `k8s/README-AWS.md`.
+
+## 5. Políticas de calidad y cumplimiento
+
+El pipeline bloquea la ejecución cuando:
+
+- Falla una prueba automatizada.
+- La cobertura cae por debajo de los umbrales de Jest configurados en `package.json`.
+- `npm audit` encuentra vulnerabilidades de nivel alto o crítico.
+- La auditoría personalizada detecta que se perdió una configuración de seguridad obligatoria.
+- Docker no puede construir o el endpoint de salud no responde.
+
+Además, en GitHub se debe proteger la rama `main` y exigir que pase el check **Pruebas, auditoría y despliegue simulado** antes de permitir el merge. La configuración se realiza en **Settings → Branches → Add branch protection rule**. Se recomienda exigir Pull Request, bloquear force-push y exigir el check de GitHub Actions.
+
+## 6. Despliegue en AWS EKS
+
+Los manifiestos y scripts están en `k8s/`. El procedimiento paso a paso, IAM, Amazon ECR, CloudWatch, dashboards, validación y limpieza está documentado en [`k8s/README-AWS.md`](k8s/README-AWS.md).
+
+No ejecutar la creación del clúster sin revisar antes los cargos de AWS. Amazon EKS cobra por hora de clúster y también se pagan los nodos EC2, discos EBS, direcciones IP públicas y otros recursos utilizados. Consulta los precios vigentes en https://aws.amazon.com/eks/pricing/.
+
+## 7. Uso de IA en el trabajo
+
+Para cumplir la indicación de la pauta, el equipo debe declarar y citar las herramientas de IA que realmente utilizó. Ejemplo que debe ser revisado y adaptado por el equipo: “Se utilizó ChatGPT como apoyo para revisar configuraciones, proponer estructura de monitoreo y explicar herramientas DevOps. El equipo revisó, ejecutó y validó las configuraciones antes de incorporarlas”.
+
+Las conclusiones y reflexiones individuales deben ser escritas por cada integrante sin apoyo de IA, tal como exige la pauta de la evaluación.
