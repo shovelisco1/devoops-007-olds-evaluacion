@@ -11,3 +11,6 @@ function logEvent(level, message, metadata = {}) {
 }
 
 module.exports = { logEvent };
+
+
+//se logra ver con docker compose logs -f microservicio
